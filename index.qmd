@@ -1,0 +1,823 @@
+---
+title: "Doctors Segmentation in Python"
+author: "Iman Mousavi"
+format: html
+jupyter: python3
+date: "2023-06-20"
+execute: 
+  echo: false
+  cache: false
+  warning: false
+toc: true
+toccolor: "#023E8A"
+toc-title: Sections
+theme: theme.scss
+code-link: true
+code-fold: show
+code-tools: true
+highlight-style: github
+---
+
+In this project, individual doctors are segmented into distinct groups as a part of marketing strategy process. First, Exploratory Data Analysis (EDA) helps to understand four data sets and their unique characteristics. After cleaning and making data tidy, cluster analysis algorithm is run to obtain segments, and Kernel PCA as a dimension reduction technique improves clustering as the final step.
+
+![Market Segmentation](market-segmentation.png)
+
+# Main Objective of the Project
+
+## Can you find a better way to segment your customers?
+
+### 📖 Background
+
+You work for a medical device manufacturer in Switzerland. Your company manufactures orthopedic devices and sells them worldwide. The company sells directly to individual doctors who use them on rehabilitation and physical therapy patients.
+
+Historically, the sales and customer support departments have grouped doctors by geography. However, the region is not a good predictor of the number of purchases a doctor will make or their support needs.
+
+Your team wants to use a data-centric approach to segmenting doctors to improve marketing, customer service, and product planning.
+
+### 💾 The data
+
+The company stores the information you need in the following four tables. Some of the fields are anonymized to comply with privacy regulations.
+
+#### Doctors contains information on doctors. Each row represents one doctor.
+
+-   "DoctorID" - is a unique identifier for each doctor.
+-   "Region" - the current geographical region of the doctor.
+-   "Category" - the type of doctor, either 'Specialist' or 'General Practitioner.
+-   "Rank" - is an internal ranking system. It is an ordered variable: The highest level is Ambassadors, followed by Titanium Plus, Titanium, Platinum Plus, Platinum, Gold Plus, Gold, Silver Plus, and the lowest level is Silver.
+-   "Incidence rate" and "R rate" - relate to the amount of re-work each doctor generates.
+-   "Satisfaction" - measures doctors' satisfaction with the company.
+-   "Experience" - relates to the doctor's experience with the company.
+-   "Purchases" - purchases over the last year.
+
+#### Orders contains details on orders. Each row represents one order; a doctor can place multiple orders.
+
+-   "DoctorID" - doctor id (matches the other tables).
+-   "OrderID" - order identifier.
+-   "OrderNum" - order number.
+-   "Conditions A through J" - map the different settings of the devices in each order. Each order goes to an individual patient.
+
+#### Complaints collects information on doctor complaints.
+
+-   "DoctorID" - doctor id (matches the other tables).
+-   "Complaint Type" - the company's classification of the complaints.
+-   "Qty" - number of complaints per complaint type per doctor.
+
+#### Instructions has information on whether the doctor includes special instructions on their orders.
+
+-   "DoctorID" - doctor id (matches the other tables).
+-   "Instructions" - 'Yes' when the doctor includes special instructions, 'No' when they do not.
+
+### 💪 Competition challenge
+
+Create a report that covers the following:\
+1. How many doctors are there in each region? What is the average number of purchases per region?\
+2. Can you find a relationship between purchases and complaints?\
+3. Define new doctor segments that help the company improve marketing efforts and customer service.\
+4. Identify which features impact the new segmentation strategy the most.\
+5. Your team will need to explain the new segments to the rest of the company. Describe which characteristics distinguish the newly defined segments.
+
+# Doctors Data
+
+```{python Libraries}
+import pandas as pd
+from pandas.api.types import CategoricalDtype
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import missingno as msno
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import KNNImputer
+from IPython.display import display, Markdown
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.decomposition import KernelPCA
+from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+from scipy.cluster.vq import kmeans, vq
+```
+
+```{python Import Data}
+doctors = pd.read_csv('doctors.csv')
+orders = pd.read_csv('orders.csv')
+complaints = pd.read_csv('complaints.csv')
+instruction = pd.read_csv('instructions.csv')
+```
+
+```{python Checking Doctors Data}
+display(doctors.head())
+display(doctors.info())
+```
+
+Satisfaction includes -- values that should be converted into NaNs.
+
+```{python Replacing -- with NaNs}
+doctors.replace({'--':np.nan}, inplace=True)
+```
+
+Rank is a categorical variable, like Region and Category
+
+```{python Transforming Rank into Categorical Data}
+print(doctors['Rank'].unique())
+cat_type = CategoricalDtype(categories=['Silver', 'Silver Plus',
+                                         'Gold', 'Gold Plus', 'Platinum',
+                                         'Platinum Plus', 'Titanium',
+                                         'Titanium Plus', 'Ambassador'],
+                                         ordered=True)
+doctors['Rank'] = doctors['Rank'].astype(cat_type)
+```
+
+```{python Transforming Category Region into Categorical Data}
+doctors['Category'] = doctors['Category'].astype('category')
+doctors['Region'] = doctors['Region'].astype('category')
+```
+
+Satisfaction must be converted into float64:
+
+```{python Satisfaction as Float64}
+doctors['Satisfaction'] = doctors['Satisfaction'].astype('float64')
+```
+
+Purchases as the name of the last column could be misleading as it refers to previous year.
+
+```{python Purchases Name}
+doctors.rename({'Purchases':'last_purchases'}, inplace = True, axis = 1)
+```
+
+Now, let's check the changes:
+
+```{python Checking Doctors Data after DType Corrections}
+display(doctors.head())
+display(doctors.info())
+```
+
+# Orders Data
+
+```{python Checking Orders Data}
+display(orders.head())
+display(orders.info())
+```
+
+Conditions C, F, G, and J are objects dtype.
+
+```{python Condition C }
+display(orders['Condition C'].head())
+display(orders['Condition C'].unique())
+```
+
+```{python Replacing True and False with 0 and 1}
+orders.replace({True:1, False:0}, inplace=True)
+orders.replace({'Before':0, 'After':1}, inplace=True)
+
+orders['Condition C'] = orders['Condition C'].astype('Int16')
+orders['Condition F'] = orders['Condition F'].astype('Int16')
+orders['Condition G'] = orders['Condition G'].astype('Int16')
+orders['Condition J'] = orders['Condition J'].astype('Int16')
+```
+
+```{python Checking Orders Data after Numerical Transformation}
+display(orders.head())
+display(orders.info())
+```
+
+```{python Unique DoctorID and OrderID}
+doctorid_orders = len(orders['DoctorID'].unique())
+orderid_orders = len(orders['OrderID'].unique())
+
+display(Markdown(f'There are {orders.shape[0]} records in orders data set. Number of unique DoctorID in order data set is {doctorid_orders} and the number of OrderID in that data set is {orderid_orders}. In other words, there are a few order cases that are duplicated and should be treated approporiatly.'))
+```
+
+The following dataframe shows duplicated cases in orders data set:
+
+```{python Duplicated Cases in Orders}
+display(orders[orders.duplicated(subset = 'OrderID', keep = False)])
+```
+
+We have to decide whether to keep the first or the second duplicated case. According to the next plot, most cases have had 0 or 1 conditions, so we go on with the first cases as they have just one condition too.
+
+```{python Number of Conditions for each Order}
+agg_conditions = orders.loc[:, 'Condition A':'Condition J']\
+.sum(axis = 1).astype('category')
+
+agg_conditions_df = pd.DataFrame({'agg_cond':agg_conditions})
+
+sns.countplot(x = 'agg_cond', data = agg_conditions_df)
+plt.show()
+plt.clf()
+```
+
+```{python Dropping Duplicated OrderIDs}
+orders.drop_duplicates(subset = ['OrderID'], inplace = True)
+```
+
+Each doctor may placed several orders due to the fact that some DoctorIDs are repetitive but with different OrderIDs. To have a data set with unique DoctorIDs, we aggregate order conditions so that each row in this dataframe is representing one doctor with orders that could have multiple conditions.
+
+```{python Orders Aggregated}
+conditions = orders.filter(like = 'Condition')
+agg_orders = orders.groupby('DoctorID')[conditions.columns].sum()\
+.reset_index()
+
+agg_orders['total_settings'] = agg_orders.loc[:,'Condition A':'Condition J'].sum(axis = 1)
+
+agg_orders['total_orders'] = orders.groupby('DoctorID')['OrderID'].size().values
+
+display(agg_orders)
+```
+
+Now, let's take a look into orders dataframe to see how doctors orders are distributed.
+
+```{python Orders Distribution}
+sns.countplot(x = 'total_orders', data = agg_orders)
+plt.show()
+plt.clf()
+
+sns.kdeplot(x = 'total_orders', data = agg_orders)
+sns.rugplot(x = 'total_orders', data = agg_orders)
+plt.show()
+plt.clf()
+```
+
+# Complaints Data
+
+```{python Checking Complaints Data}
+display(complaints.head())
+display(complaints.info())
+```
+
+```{python NaNs in Complaints}
+display(Markdown(f'Complaints data set has {complaints["Complaint Type"].isnull().sum()} in Complaint Type column. We can drop both safely.'))
+
+complaints.dropna(inplace = True)
+```
+
+```{python Unique DoctorIDs in Complaints}
+num_uniq_complaints = len(complaints['DoctorID'].unique())
+display(Markdown(f'Number of unique DoctorIDs in complaints data is {num_uniq_complaints} and the number of cases in this data set is {complaints.shape[0]}. Therefore, some doctors have had more than one complaints.'))
+```
+
+To have a complaints data set with unique DoctorIDs we change the shape to the following:
+
+```{python New Shape of Complaints}
+complaints_wider = complaints.pivot(columns = ['Complaint Type'], index = ['DoctorID'],
+values = ['Qty'])
+
+complaints_wider.reset_index(inplace = True)
+
+complaints_wider.fillna(0, inplace = True)
+
+complaints_wider.columns = ['DoctorID'] + [name[1] for name in complaints_wider.columns[1:]]
+
+float_columns = complaints_wider.select_dtypes(include=['float']).columns
+complaints_wider[float_columns] = complaints_wider[float_columns].astype(int)
+
+display(complaints_wider)
+```
+
+Let's see how many complaints exist in each type:
+
+```{python Complaint Types Summary}
+complaints_wider.drop('DoctorID', axis = 1).sum()
+```
+
+Finally, a new feature is create to indicate the total number of complaints each doctor has made.
+
+```{python Total Complaints Feature}
+complaints_wider['total_complaints'] = complaints_wider.iloc[:,1:6].sum(axis = 1)
+```
+
+# Instructions Data
+
+```{python Checking Instructions Data}
+display(instruction.head())
+display(instruction.info())
+```
+
+```{python Unique DoctorIDs in Instruction}
+num_uniq_instruction = len(instruction['DoctorID'].unique())
+display(Markdown(f'Number of unique DoctorIDs in instruction data is {num_uniq_instruction} and the number of cases in this data set is {instruction.shape[0]}. In other words, there are no duplicated instructions.'))
+```
+
+```{python Changing Instructions Column to Integer}
+instruction.replace({'Yes':1, 'No':0}, inplace = True)
+```
+
+# Merged Data
+
+```{python Merged Data Set}
+merged_data = doctors.merge(agg_orders, on = 'DoctorID', how = 'left')\
+.merge(complaints_wider, on = 'DoctorID', how = 'left')\
+.merge(instruction, on = 'DoctorID', how = 'left')
+
+missing_merged = merged_data.loc[:,'Condition A':].columns
+merged_data[missing_merged] = merged_data[missing_merged].fillna(0)
+
+int_columns = merged_data.loc[:,'Condition A':'Instructions'].columns
+merged_data[int_columns] = merged_data[int_columns].astype('float16')
+
+display(merged_data)
+```
+
+# Missing Values
+
+```{python Merged Data set Missings}
+msno.bar(merged_data, figsize = (9,9))
+plt.show()
+plt.clf()
+
+msno.matrix(merged_data, figsize = (9,9))
+plt.show()
+plt.clf()
+```
+
+There are two cases in which Rank column has no information and it is acceptable to consider such missings MCAR (Missing Completely at Random). The best thing we can do here is to omit both of them.
+
+```{python Dropping Missing Ranks}
+merged_data.dropna(subset = ['Rank'], inplace = True)
+```
+
+Lets see if we can find out any relationship between other variables and missing values in `Satisfaction` field.
+
+```{python Relationship between Missing Values and Other Features}
+merged_data['Satisfaction_na'] = merged_data['Satisfaction'].isnull()
+
+merged_data.groupby('Category')['Satisfaction_na']\
+.value_counts()
+
+merged_data.groupby('Rank')['Satisfaction_na']\
+.value_counts()
+
+sns.kdeplot(x = 'Incidence rate', hue = 'Satisfaction_na', data = merged_data)
+sns.rugplot(x = 'Incidence rate', hue = 'Satisfaction_na', data = merged_data, height = 0.04)
+plt.show()
+plt.clf()
+
+sns.kdeplot(x = 'R rate', hue = 'Satisfaction_na', data = merged_data)
+sns.rugplot(x = 'R rate', hue = 'Satisfaction_na', data = merged_data, height = 0.04)
+plt.show()
+plt.clf()
+
+sns.kdeplot(x = 'Experience', hue = 'Satisfaction_na', data = merged_data)
+sns.rugplot(x = 'Experience', hue = 'Satisfaction_na', data = merged_data, height = 0.04)
+plt.show()
+plt.clf()
+
+sns.kdeplot(x = 'last_purchases', hue = 'Satisfaction_na', data = merged_data)
+sns.rugplot(x = 'last_purchases', hue = 'Satisfaction_na', data = merged_data, height = 0.04)
+plt.show()
+plt.clf()
+
+sns.kdeplot(x = 'total_complaints', hue = 'Satisfaction_na', data = merged_data)
+sns.rugplot(x = 'total_complaints', hue = 'Satisfaction_na', data = merged_data, height = 0.04)
+plt.show()
+plt.clf()
+```
+
+These plots suggest no pattern either. However, we intend to impute missing values with multiple imputation technique using miclust package in R.
+
+# Question 1
+
+First, we group data by Region column then aggregate doctors data set to get the answer. In the next plot, the number of doctors and the average purchases in each region are demonstrated.
+
+```{python Number of Doctors in each Region}
+agg_doctors = doctors.groupby('Region').size().to_frame().reset_index()
+agg_doctors.columns = ["Region","Count"]
+
+plt.figure(figsize = (9,9))
+sns.barplot(x = 'Count', y = 'Region', data = agg_doctors, 
+order=agg_doctors.sort_values(['Count'], ascending=False)['Region'], 
+palette=sns.color_palette("Reds", 46)[::-1])
+plt.show()
+plt.clf()
+```
+
+```{python Average Purchases in each Region}
+agg_doctors = doctors.groupby('Region')['last_purchases'].agg('mean').reset_index()
+agg_doctors.columns = ['Region','avg_purchases']
+
+plt.figure(figsize = (9,9))
+sns.barplot(x = 'avg_purchases', y = 'Region', data = agg_doctors, order=agg_doctors.sort_values('avg_purchases', ascending=False)['Region'], 
+palette=sns.color_palette("Blues", 46)[::-1])
+plt.xlabel('Average Last Year Purchases')
+plt.show()
+plt.clf()
+```
+
+# Question 2
+
+```{python Total Complaints vs. Purchases}
+complaints_purchases = merged_data.loc[:,['DoctorID', 'last_purchases', 'Correct', 'Incorrect', 'R&R', 'Specific', 'total_complaints']]
+
+sns.set_style("whitegrid")
+sns.scatterplot(x = 'total_complaints', y = 'last_purchases', data = complaints_purchases)
+plt.xlabel('Total Complaints')
+plt.ylabel('Purchases of Last Year')
+plt.xticks(np.arange(0,21))
+plt.show()
+plt.clf()
+```
+
+```{python Correct and Incorrect vs. Purchases}
+sns.scatterplot(x = 'Correct', y = 'last_purchases', data = complaints_purchases)
+plt.xlabel('Correct Complaints')
+plt.ylabel('Purchases of Last Year')
+plt.xticks(np.arange(0,21))
+plt.show()
+plt.clf()
+```
+
+```{python Incorrect and Incorrect vs. Purchases}
+sns.scatterplot(x = 'Incorrect', y = 'last_purchases', data = complaints_purchases)
+plt.xlabel('Incorrect Complaints')
+plt.ylabel('Purchases of Last Year')
+plt.xticks(np.arange(0,21))
+plt.show()
+plt.clf()
+```
+
+Figures shown in above suggest number of purchases of a doctor decreases when they send their complaints to the company. This relationship is slightly more obvious if doctors complaints have been accepted by the company compared with the cases in which their complaints were not correct.
+
+# Question 3
+
+## Scaling and Creation of Dummies
+
+Clustering methods require to have an scaled and numeric data as inputs. To satisfy such constraints, we use functions from sklearn and pandas package in this section.
+
+```{python Preprocessing Data}
+# columns_to_drop = merged_data.columns.str.contains('Condition')
+# columns_to_drop = merged_data.columns[columns_to_drop]
+preprocessed_data = merged_data.drop(columns = ['DoctorID', 'Region', 'Satisfaction_na'])
+
+preprocessed_data = pd.get_dummies(data = preprocessed_data, columns = ['Category', 'Rank'], drop_first = True).replace({True:1, False:0})
+
+scaler = StandardScaler()
+
+excluding_sat = preprocessed_data.columns!='Satisfaction'
+
+preprocessed_data.loc[:,excluding_sat] = scaler.fit_transform(preprocessed_data.loc[:,excluding_sat])
+```
+
+# Satisfaction Imputation
+
+## Imputation with KNN
+
+First few rows of imputed satisfaction column with KNN method:
+
+```{python KNN Imputation}
+knn_imputer = KNNImputer(n_neighbors = 2)
+knn_imputed = knn_imputer.fit_transform(preprocessed_data)
+merged_knn_imputed = preprocessed_data.copy(deep = True)
+merged_knn_imputed.iloc[:,:] = knn_imputed
+display(merged_knn_imputed.loc[:, 'Satisfaction'].head())
+```
+
+## Imputation with Iterative Imputation
+
+First few rows of imputed satisfaction column with Iterative method:
+
+```{python Iterative Imputation}
+#| eval: false
+iter_imputer = IterativeImputer(sample_posterior = True)
+iter_imputer.fit(preprocessed_data)
+iter_imputer.n_iter_
+
+iter_imputed = iter_imputer.transform(preprocessed_data)
+merged_iter_imputed = preprocessed_data.copy(deep = True)
+merged_iter_imputed.iloc[:,:] = iter_imputed
+display(merged_iter_imputed.loc[:, 'Satisfaction'].head())
+```
+
+## Comparing Two Imputations
+
+```{python Satisfaction_NA Creation}
+#| eval: false
+merged_knn_imputed['Satisfaction_NA'] = preprocessed_data['Satisfaction'].isnull()
+
+merged_iter_imputed['Satisfaction_NA'] = preprocessed_data['Satisfaction'].isnull()
+```
+
+```{python Comparing Imputations}
+#| eval: false
+sns.kdeplot(x = 'Satisfaction', hue = 'Satisfaction_NA', data = merged_knn_imputed)
+sns.rugplot(x = 'Satisfaction', hue = 'Satisfaction_NA', data = merged_knn_imputed)
+plt.title('Satisfaction Imputation with KNN Method')
+plt.show()
+plt.clf()
+
+sns.kdeplot(x = 'Satisfaction', hue = 'Satisfaction_NA', data = merged_iter_imputed)
+sns.rugplot(x = 'Satisfaction', hue = 'Satisfaction_NA', data = merged_iter_imputed)
+plt.title('Satisfaction Imputation with Iterative Method')
+plt.show()
+plt.clf()
+```
+
+Itarative Imputation predicted extreme values of satisfaction, which is not acceptable for our analysis. Also, the difference between peaks of imputed and observed values in KNN model is less than that of Iterative algorithm. We continue with imputed satisfaction generated by the KNN model.
+
+# Hierarchical Clustering
+
+```{python Clustering Preprocessing}
+# merged_knn_imputed.drop('Satisfaction_NA', axis = 1, inplace = True)
+merged_knn_imputed.iloc[:,:] = scaler.fit_transform(merged_knn_imputed)
+```
+
+Dendrogram plot demonstrates how far two clusters are before their integration into one. In other words, if two clusters are too far from each other, their vertical line showing distance is bigger. It's recommended that the analyst cut the tree in a distance in which so many dissimilarities are not ignored.
+
+**Here, the dendrogram proposes 3 clusters.**
+
+```{python Hierarchical}
+link = linkage(merged_knn_imputed, method = 'ward', metric = 'euclidean')
+
+dendrogram(link)
+plt.show()
+plt.clf()
+
+merged_data['hierarchy_clust'] = fcluster(link, 3, criterion = 'maxclust')
+```
+
+The plots shown here are attempting to distinguish segments the hierarchical clustering has generated. In case the vital metrics differ in a meaningful manner, we succeed in our segmentation. Otherwise, we must continue working on the algorithm and data to get a better result.
+
+Dot plots represent averages in each group alongside a vertical bar that can be interpreted as uncertainty. The more variance or standard deviation of the mean, the longer the vertical bar.
+
+```{python Hierarchical Clustering Plots}
+sns.set_style("whitegrid")
+sns.countplot(x = 'hierarchy_clust', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('Count')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust', y = 'Incidence rate', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('Average Incidence Rate')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust', y = 'R rate', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('Average R Rate')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust', y = 'Satisfaction', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('Average Satisfaction')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust', y = 'Experience', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('Average Experience')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust', y = 'last_purchases', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('Average Last Year Purchases')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust', y = 'total_orders', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group')
+plt.ylabel('This Year Orders')
+plt.show()
+plt.clf()
+```
+
+Results are not satisfactory, so it's a good idea to reduce the number of features or dimensions since cluster analysis works better with more informed components.
+
+## Hierarchical with PCA
+
+Principal Component Analysis is a popular algorithm that aims to reduce the number of features or dimensions in a dataframe. One of the most beneficial outcome of this method is that we can identify lower number of features explaining the most part of variance in a data set. This would help to get the most compact useful information leading to a practical segmentation. The following results have been obtained after PCA is applied to the merged data set of individual doctors.
+
+```{python Kernel PCA}
+pca_mdl = KernelPCA(n_components = 5,random_state = 10, kernel = 'rbf')
+pca_mdl.fit(merged_knn_imputed)
+transformed_pca = pca_mdl.transform(merged_knn_imputed)
+```
+
+**Here, the dendrogram proposes 6 clusters.**
+
+```{python Hierarchical with PCA}
+link_pca = linkage(transformed_pca, method = 'ward', metric = 'euclidean')
+
+dendrogram(link_pca)
+plt.show()
+plt.clf()
+
+merged_data['hierarchy_clust_pca'] = fcluster(link_pca, 6, criterion = 'maxclust')
+```
+
+```{python Plots of Hierarchical Clustering with PCA}
+sns.set_style("whitegrid")
+sns.countplot(x = 'hierarchy_clust_pca', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('Count')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust_pca', y = 'Incidence rate', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('Average Incidence Rate')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust_pca', y = 'R rate', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('Average R Rate')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust_pca', y = 'Satisfaction', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('Average Satisfaction')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust_pca', y = 'Experience', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('Average Experience')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust_pca', y = 'last_purchases', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('Average Last Year Purchases')
+plt.show()
+plt.clf()
+
+sns.catplot(x = 'hierarchy_clust_pca', y = 'total_orders', kind = 'point', data = merged_data)
+plt.xlabel('Cluster Group - PCA')
+plt.ylabel('This Year Orders')
+plt.show()
+plt.clf()
+```
+
+# KMeans Clustering
+
+This algorithm is another option that can be used for clustering. However, since the number of clusters must be given to the function in order to start manipulating centroids to get the best result, we create a loop in which different numbers go into the function and with the elbow plot we try to detect the finest number of clusters. In elbow plot, the distance between a centroid and the observations around it is calculated (distorsion). In case an additional centroid or cluster doesn't reduce distorsions to the previous rate, we stop searching and select the number before the last one.
+
+```{python KMeans Distorsions}
+distorsions = []
+num_clusters = range(2,10)
+
+for i in num_clusters:
+    centroids, distorsion = kmeans(merged_knn_imputed, i)
+    distorsions.append(distorsion)
+  
+elbow_plot_df = pd.DataFrame({'num_clusters':num_clusters, 'distorsions':distorsions})
+
+sns.lineplot(x = 'num_clusters', y = 'distorsions', data = elbow_plot_df)
+plt.show()
+plt.clf()
+```
+
+Using all the features sounds not a good idea since the elbow plot has no suggestion for the number of clusters. PCA could enhance our algorithm because it takes into account only those components that have the most variance.
+
+### KMeans with PCA
+
+```{python KMeans with PCA}
+distorsions = []
+num_clusters = range(2,10)
+
+for i in num_clusters:
+    centroids, distorsion = kmeans(transformed_pca, i)
+    distorsions.append(distorsion)
+  
+elbow_plot_df = pd.DataFrame({'num_clusters':num_clusters, 'distorsions':distorsions})
+
+sns.lineplot(x = 'num_clusters', y = 'distorsions', data = elbow_plot_df)
+plt.show()
+plt.clf()
+```
+
+This plot also confirms that 6 clusters is an appropriate number of clusters in our case.
+
+# Question 4 and 5
+
+## Names and Characteristics of Doctors Segmentations
+
+In this section, each cluster is attempted to be described with the features given in the data.
+
+First things first, let's take a look for one more time to the number of individuals in each cluster.
+
+```{python Number of Individuals in each Cluster}
+merged_data.rename(columns = {'hierarchy_clust_pca':'Cluster Group'}, inplace = True)
+cluster_count = merged_data.groupby('Cluster Group').size().reset_index()
+cluster_count.rename(columns = {0:'Count'}, inplace = True)
+
+display(cluster_count)
+```
+
+Group 6 has the highest number of individuals followed by group 3 and 2. Group 1 has the lowest population.
+
+Next, due to the importance of customer satisfaction in every business, the following plot shows how satisfaction is distributed among 6 groups.
+
+```{python Plot Colors}
+plot_colors = ['#264653', '#2A9D8F', '#E9C46A', '#F4A261', '#E76F51']
+```
+
+```{python Satisfaction of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'Satisfaction', kind = 'point', data = merged_data, color = plot_colors[0])
+plt.show()
+plt.clf()
+```
+
+Doctors in group 3 are more satisfied customers of the company in average and the error bar is relatively low. In the second place, group 6 contains comparitively satisfied doctors. On the other hand, group 6 and group 1 are not very satisfied in average, but the error bars are larger than the others. In group 1 specifically, there are a wide range of satisfaction as the error bar length is considerable.
+
+Experience column can detect which customers have been working with the company longer and which of them have purchased recently.
+
+```{python Experience of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'Experience', kind = 'point', data = merged_data, color = plot_colors[1])
+plt.show()
+plt.clf()
+```
+
+Doctors of group 2 have more experience followed by group 1. Differences among other groups are not so strong.
+
+The next two figures show the average of Incident Rate and R Rate (Rework) for each cluster group.
+
+Although Group 1 has the lowest rework rate, other cluster groups have no meaningful difference. Incident rate, however, has a large value for group 2 and 6, with a lower standard deviation for the latter.
+
+```{python Incidence rate of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'Incidence rate', kind = 'point', data = merged_data, color = plot_colors[2])
+plt.show()
+plt.clf()
+```
+
+```{python R rate of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'R rate', kind = 'point', data = merged_data, color = plot_colors[3])
+plt.show()
+plt.clf()
+```
+
+In the next plot, you can see the average number of purchases in each cluster. Group 3 and 2 have purchased more (group 3 has lower uncertainty) and Group 1, 4, and 5 haven't chosen the company for supply.
+
+```{python Last Purchases of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'last_purchases', kind = 'point', data = merged_data, color = plot_colors[4])
+plt.ylabel('Purchases of Last Year')
+plt.show()
+plt.clf()
+```
+
+Also, the average number of settings that customers demanded along their orders matters. Group 2 on average, are more detailed for their order.
+
+```{python Total Settings of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'total_settings', kind = 'point', data = merged_data, color = plot_colors[0])
+plt.ylabel('Total Settings Demanded')
+plt.show()
+plt.clf()
+```
+
+Group 2 are complaining more than any other group as the next dot plot shows.
+
+```{python Correct Complaints of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'total_complaints', kind = 'point', data = merged_data, color = plot_colors[1])
+plt.ylabel('Total Complaints')
+plt.show()
+plt.clf()
+```
+
+Groups 2 and 3 have had more instructions relatively.
+
+```{python Instructions of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'Instructions', kind = 'point', data = merged_data, color = plot_colors[2])
+plt.ylabel('Instructions')
+plt.show()
+plt.clf()
+```
+
+Finally, group 2 have placed more orders recently implying they are more interested to buy from the company. In other words, the company should put their energy into luring them. Marketing activities should revolve aroung such customers with their specific characteristics.
+
+```{python Total Orders of Clusters}
+sns.catplot(x = 'Cluster Group', y = 'total_orders', kind = 'point', data = merged_data, color = plot_colors[3])
+plt.ylabel('Total Orders')
+plt.show()
+plt.clf()
+```
+
+## Names of Clusters
+
+Group 1 haven't purchased that much compared to others and their satisfaction are so volatile meaning that some of doctors have been delighted and some have been unsatisfied. Their incident rate and rework rate are low, which is a cost privilege for the company. Their size is not that significant though.
+
+**Group 1 is named "Easy-goings Doctors"**
+
+Group 2 have more experience with the products of the company. However, their incident rate and rework are high. These customers have already purchased last year almost 13 times. They have complained more than others partially because of their high number of purchases. The instructions they need are also more significant. Most orders in this year comes from group 2.
+
+**Group 2 is named "Picking Loyal Doctors"**
+
+Group 3 consist of customers with the most purchases from last year, but their orders for this year has dropped to almost zero. They've been more satisfied group with past experience. They didn't complain of their purchases, so it's a mystery why they've stopped buying from the company. More investigation is required in order to explain the reasons underlying their reluctance.
+
+**Group 3 is named "Mysterious Doctors"**
+
+Group 4 contains doctors who are happy with their previous purchases, but in general, they don't have much experience and their purchases in the last year was trivial. This group has some orders this year.
+
+**Group 4 is named "Curious Doctors"**
+
+Group 5 doctors have the least experience with the lowest satisfaction rate. They haven't bought last year so we are almost confident we can ignore this segment of doctors. The number of doctors in this group is negligible too.
+
+**Group 5 is named "Ignored Doctors"**
+
+Group 6 include doctors who are the happiest with their previous purchases after group 3. Instructions in this group is low comparing to others, but their incident rate is rather high. Doctors in this group have placed some orders too. The majority of doctors have been categorized in this group.
+
+**Group 6 is named "Promising Doctors"**
+
+## Targeted Groups
+
+In conclusion, the company should focus on group 6 with the intention of converting them into regular customers. Group 2 includes the most royal customers whose satisfaction is a priority. Group 3 is also important regarding the fact that they can be transformed from inactive customers to active ones. Groups 1 and 4 can be treated with less attention and group 5 should be left out.
