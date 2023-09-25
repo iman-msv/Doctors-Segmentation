@@ -1,7 +1,10 @@
 ---
 title: "Doctors Segmentation in Python"
 author: "Iman Mousavi"
-format: html
+format:
+  html:
+    theme: cosmo
+    css: styles.css
 jupyter: python3
 date: "2023-06-20"
 execute: 
